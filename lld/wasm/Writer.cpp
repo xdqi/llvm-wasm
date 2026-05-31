@@ -502,7 +502,13 @@ void Writer::layoutMemory() {
 }
 
 void Writer::runScript() {
-  if (ctx.isPic || config->relocatable || config->globalBase) {
+  // Original Joel patch rejected --script in -r mode. LKL/wasm needs the
+  // SECTIONS{} block in arch/lkl/kernel/vmlinux.lds.S to materialise the
+  // bracket symbols (__setup_start, __initcall_start, init_thread_union, ...)
+  // into the relocatable lkl.o that's archived into liblkl.a. The addresses
+  // assigned here are placeholders; the host-side wasm-ld (emcc) re-links
+  // and the symbol values get patched up via the normal relocation table.
+  if (ctx.isPic || config->globalBase) {
     error("any kind of position independent/dynamic code can't be used with manual memory layout");
   } else if (config->stackFirst) {
     error("--stack-first can't be used with manual memory config (place it manually instead)");
@@ -671,14 +677,25 @@ void Writer::runScript() {
     memoryPtr = parser.dot;
   }
 
-  // This works fine if there is only one bss segment and it comes last.
-  // But we can/will have at least two, so let's fake index.
-  size_t nonIndex = 0;
-  for (size_t i = 0; i < segments.size(); ++i)
-    if (needsPassiveInitialization(segments[i]) && !segments[i]->isBss)
-      segments[i]->index = nonIndex++;
-    else
-      segments[i]->index = static_cast<uint32_t>(-1);
+  // In -r mode the wasm data section enumerates every active segment in
+  // order; the linking section's symbol-info entries cite each symbol's
+  // segment by that ordinal. Assign sequential indices to mirror what the
+  // non-script path does in createOutputSegments() (line 1294). For
+  // non-relocatable, non-shared-memory active segments the index is unused
+  // (no memory.init op references it), so sequential numbering is harmless.
+  if (config->relocatable) {
+    for (size_t i = 0; i < segments.size(); ++i)
+      segments[i]->index = i;
+  } else {
+    // This works fine if there is only one bss segment and it comes last.
+    // But we can/will have at least two, so let's fake index.
+    size_t nonIndex = 0;
+    for (size_t i = 0; i < segments.size(); ++i)
+      if (needsPassiveInitialization(segments[i]) && !segments[i]->isBss)
+        segments[i]->index = nonIndex++;
+      else
+        segments[i]->index = static_cast<uint32_t>(-1);
+  }
 
   // Make space for the memory initialization flag
   if (config->sharedMemory && hasPassiveInitializedSegments()) {

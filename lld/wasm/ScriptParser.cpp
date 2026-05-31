@@ -105,6 +105,13 @@ void ScriptParser::readLinkerScript() {
 
     if (tok == "SECTIONS") {
       readSections();
+    } else if (tok == "OUTPUT_FORMAT" || tok == "OUTPUT_ARCH" ||
+               tok == "ENTRY" || tok == "TARGET") {
+      // Ignored: arch/lkl/kernel/vmlinux.lds.S emits OUTPUT_FORMAT("wasm32");
+      // wasm-ld already knows the target. Consume "(<token>)".
+      expect("(");
+      while (!atEOF() && !consume(")"))
+        next();
     } else if (SymbolAssignment *cmd = readAssignment(tok)) {
       sectionCommands.push_back(cmd);
     } else {

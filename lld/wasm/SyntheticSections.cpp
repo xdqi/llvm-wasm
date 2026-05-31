@@ -665,7 +665,12 @@ void LinkingSection::writeBody() {
       } else if (isa<DataSymbol>(sym)) {
         writeStr(sub.os, sym->getName(), "sym name");
         if (auto *dataSym = dyn_cast<DefinedData>(sym)) {
-          if (dataSym->segment) {
+          // In relocatable mode (-r) with a SECTIONS{} linker script, script-
+          // defined symbols (e.g. __setup_start, init_thread_union) may have a
+          // synthetic InputSegment attached without an OutputSegment - the
+          // final placement is deferred to the host link. Treat those the same
+          // as segment-less absolute symbols.
+          if (dataSym->segment && dataSym->segment->outputSeg) {
             writeUleb128(sub.os, dataSym->getOutputSegmentIndex(), "index");
             writeUleb128(sub.os, dataSym->getOutputSegmentOffset(),
                          "data offset");
