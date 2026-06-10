@@ -1,0 +1,92 @@
+name: wasm-ld-release
+
+# Builds the patched wasm-ld (GNU-ld linker-script support for LKL's
+# vmlinux link) and publishes it as a GitHub release asset consumed by
+# anyfs-reader's scripts/fetch_wasm_ld.sh. Compilation is distributed
+# over an ephemeral sccache-dist farm.
+#
+# NOTE: the farm steps need the TS_OAUTH_SECRET repository secret. If it
+# is missing, the workers job fails fast (harmlessly) and the build job
+# falls back to a plain local clang build: the coordinator step is
+# continue-on-error and the Build step only enables the sccache compiler
+# launcher when an sccache binary is actually available.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'release tag (e.g. wasm-ld-18.1.2-anyfs-r1)'
+        required: true
+
+jobs:
+  sccache-workers:
+    name: sccache worker ${{ matrix.idx }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      matrix:
+        idx: [1, 2, 3]
+    steps:
+      - uses: xdqi/sccache-dist-action@v0.0.4
+        with:
+          mode: worker
+          worker-index: '${{ matrix.idx }}'
+          oauth-secret: '${{ secrets.TS_OAUTH_SECRET }}'
+
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install deps
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake ninja-build clang lld python3
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/sccache
+          key: sccache-wasm-ld-${{ github.sha }}
+          restore-keys: |
+            sccache-wasm-ld-
+      - name: Bring up sccache-dist farm
+        continue-on-error: true
+        uses: xdqi/sccache-dist-action@v0.0.4
+        with:
+          mode: coordinator
+          expected-workers: 3
+          min-workers: 1
+          oauth-secret: '${{ secrets.TS_OAUTH_SECRET }}'
+      - name: Build wasm-ld
+        run: |
+          CMAKE_LAUNCHER_ARGS=""
+          if command -v sccache >/dev/null 2>&1; then
+            CMAKE_LAUNCHER_ARGS="-DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache"
+          else
+            echo "sccache not available; building without a compiler launcher"
+          fi
+          cmake -S llvm -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+            $CMAKE_LAUNCHER_ARGS \
+            -DLLVM_ENABLE_PROJECTS=lld \
+            -DLLVM_TARGETS_TO_BUILD=WebAssembly \
+            -DLLVM_INCLUDE_TESTS=OFF -DLLVM_INCLUDE_BENCHMARKS=OFF
+          ninja -C build -j"${SCCACHE_J:-$(nproc)}" lld
+          if command -v sccache >/dev/null 2>&1; then
+            sccache --show-stats
+          fi
+      - name: Package
+        run: |
+          mkdir -p out
+          cp build/bin/wasm-ld out/wasm-ld   # lld symlink target; cp dereferences it
+          strip out/wasm-ld
+          out/wasm-ld --version | grep -q 'LLD 18'
+          tar -C out -cJf wasm-ld-linux-amd64.tar.xz wasm-ld
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ inputs.tag }}" wasm-ld-linux-amd64.tar.xz \
+            --target "$GITHUB_SHA" \
+            --title "${{ inputs.tag }}" \
+            --notes "Patched wasm-ld (GNU-ld SECTIONS{} support) for anyfs-reader's LKL wasm link."
