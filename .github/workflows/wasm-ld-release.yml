@@ -42,13 +42,15 @@ jobs:
     continue-on-error: true
     strategy:
       matrix:
-        idx: [1, 2, 3]
+        idx: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     steps:
-      - uses: xdqi/sccache-dist-action@v0.0.4
+      - uses: xdqi/sccache-dist-action@v0.0.5
         with:
           mode: worker
           worker-index: '${{ matrix.idx }}'
           oauth-secret: '${{ secrets.TS_OAUTH_SECRET }}'
+          # The OAuth client owns tag:ci (not the action default tag:ci-sccache).
+          tags: 'tag:ci'
 
   build:
     runs-on: ubuntu-24.04
@@ -88,12 +90,14 @@ jobs:
 
       - name: Bring up sccache-dist farm (optional)
         continue-on-error: true
-        uses: xdqi/sccache-dist-action@v0.0.4
+        uses: xdqi/sccache-dist-action@v0.0.5
         with:
           mode: coordinator
-          expected-workers: 3
+          expected-workers: 10
           min-workers: 1
           oauth-secret: '${{ secrets.TS_OAUTH_SECRET }}'
+          # The OAuth client owns tag:ci (not the action default tag:ci-sccache).
+          tags: 'tag:ci'
 
       - name: Build wasm-ld
         run: |
