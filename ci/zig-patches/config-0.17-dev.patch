@@ -1,0 +1,17 @@
+--- a/include/__config
++++ b/include/__config
+@@ -488,6 +488,14 @@
+ #    endif
+ #  endif
+ 
++// anyfs override: re-enable C++17 aligned new/delete on glibc < 2.16
++#if defined(__GLIBC__) && (__GLIBC__ < 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ < 16))
++#  undef  _LIBCPP_HAS_LIBRARY_ALIGNED_ALLOCATION
++#  define _LIBCPP_HAS_LIBRARY_ALIGNED_ALLOCATION 1
++#  undef  _LIBCPP_HAS_ALIGNED_ALLOCATION
++#  define _LIBCPP_HAS_ALIGNED_ALLOCATION 1
++#endif
++
+ #  if defined(__APPLE__) || defined(__FreeBSD__)
+ #    define _LIBCPP_WCTYPE_IS_MASK
+ #  endif

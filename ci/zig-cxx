@@ -1,0 +1,15 @@
+#!/bin/sh
+# C++ compiler wrapper for the wasm-ld release build.
+#
+# CMake cannot take a multi-word compiler command, hence this wrapper.
+# Targets glibc 2.11 so the released binary runs on ancient distros
+# (same portable-binary approach as msys2-cross's pacman-static).
+# Requires the bundled libc++ to be patched first by
+# ci/patch_zig_libcxx_oldglibc.sh (C++17 aligned new on pre-2.16 glibc).
+#
+# sccache is optional: use it when on PATH (sccache-dist farm up),
+# plain zig otherwise.
+if command -v sccache >/dev/null 2>&1; then
+    exec sccache zig c++ -target x86_64-linux-gnu.2.11 "$@"
+fi
+exec zig c++ -target x86_64-linux-gnu.2.11 "$@"

@@ -1,0 +1,22 @@
+--- a/include/__memory/aligned_alloc.h
++++ b/include/__memory/aligned_alloc.h
+@@ -29,7 +29,7 @@
+ inline _LIBCPP_HIDE_FROM_ABI void* __libcpp_aligned_alloc(std::size_t __alignment, std::size_t __size) {
+ #  if defined(_LIBCPP_MSVCRT_LIKE)
+   return ::_aligned_malloc(__size, __alignment);
+-#  elif _LIBCPP_STD_VER >= 17 && _LIBCPP_HAS_C11_ALIGNED_ALLOC
++#  elif (_LIBCPP_STD_VER >= 17 && _LIBCPP_HAS_C11_ALIGNED_ALLOC) && !(defined(__GLIBC__) && (__GLIBC__ < 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ < 16)))  // anyfs override: old-glibc -> posix_memalign
+   // aligned_alloc() requires that __size is a multiple of __alignment,
+   // but for C++ [new.delete.general], only states "if the value of an
+   // alignment argument passed to any of these functions is not a valid
+--- a/src/include/aligned_alloc.h
++++ b/src/include/aligned_alloc.h
+@@ -31,7 +31,7 @@
+   return ::_aligned_malloc(__size, __alignment);
+ 
+ // Android only provides aligned_alloc when targeting API 28 or higher.
+-#  elif !defined(__ANDROID__) || __ANDROID_API__ >= 28
++#  elif (!defined(__ANDROID__) || __ANDROID_API__ >= 28) && !(defined(__GLIBC__) && (__GLIBC__ < 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ < 16)))  // anyfs override: old-glibc -> posix_memalign
+   // aligned_alloc() requires that __size is a multiple of __alignment,
+   // but for C++ [new.delete.general], only states "if the value of an
+   // alignment argument passed to any of these functions is not a valid

@@ -1,15 +1,27 @@
 name: wasm-ld-release
 
-# Builds the patched wasm-ld (GNU-ld linker-script support for LKL's
-# vmlinux link) and publishes it as a GitHub release asset consumed by
-# anyfs-reader's scripts/fetch_wasm_ld.sh. Compilation is distributed
-# over an ephemeral sccache-dist farm.
+# Builds the patched wasm-ld (GNU-ld SECTIONS{} linker-script support for
+# LKL's vmlinux wasm link) and publishes it as a GitHub release asset
+# (wasm-ld-linux-amd64.tar.xz) consumed by anyfs-reader.
 #
-# NOTE: the farm steps need the TS_OAUTH_SECRET repository secret. If it
-# is missing, the workers job fails fast (harmlessly) and the build job
-# falls back to a plain local clang build: the coordinator step is
-# continue-on-error and the Build step only enables the sccache compiler
-# launcher when an sccache binary is actually available.
+# The build uses `zig cc`/`zig c++` targeting x86_64-linux-gnu.2.11 so the
+# released binary runs on ancient glibc (same portable-binary approach as
+# msys2-cross's pacman-static). Zig's bundled libc++ is patched first by
+# ci/patch_zig_libcxx_oldglibc.sh (vendored from msys2-cross) so C++17
+# aligned new/delete links against pre-2.16 glibc. Targeting gnu.2.11 on
+# x86_64-linux is not cross-compiling in CMake's eyes (same arch/OS), so
+# native tablegen works without a two-stage build.
+#
+# sccache-dist farm acceleration is FULLY OPTIONAL: every farm piece needs
+# the TS_OAUTH_SECRET repository secret. When it is absent, the workers job
+# and the coordinator step fail fast (both continue-on-error) and the
+# ci/zig-cc / ci/zig-cxx wrappers fall back to plain zig because no sccache
+# binary lands on PATH.
+#
+# Known sccache wart: the v0.0.4 engine keys compiler info by executable
+# path only, conflating `zig cc` and `zig c++`; distributed C++ compiles
+# can fail preprocessing. SCCACHE_DIST_FALLBACK=true (the action default)
+# degrades those to local compiles, which is acceptable here.
 
 on:
   workflow_dispatch:
@@ -18,11 +30,16 @@ on:
         description: 'release tag (e.g. wasm-ld-18.1.2-anyfs-r1)'
         required: true
 
+env:
+  ZIG_VERSION: 0.16.0
+
 jobs:
   sccache-workers:
     name: sccache worker ${{ matrix.idx }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 300
+    # Optional farm: without TS_OAUTH_SECRET this job fails fast, harmlessly.
+    continue-on-error: true
     strategy:
       matrix:
         idx: [1, 2, 3]
@@ -35,20 +52,41 @@ jobs:
 
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 300
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
+
       - name: Install deps
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake ninja-build clang lld python3
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build python3 xz-utils binutils file
+
+      - name: Install zig
+        run: |
+          curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" \
+            | tar -xJ -C "$HOME"
+          mv "$HOME/zig-x86_64-linux-${ZIG_VERSION}" "$HOME/zig"
+          echo "$HOME/zig" >> "$GITHUB_PATH"
+          "$HOME/zig/zig" version
+
+      # Old-glibc targets (<2.16) otherwise hit `undefined symbol:
+      # aligned_alloc` / missing aligned operator new from zig's vendored
+      # libc++. The script era-detects, patches in place and self-verifies
+      # with a posix_memalign probe.
+      - name: Patch zig libc++ for old-glibc aligned new
+        run: ci/patch_zig_libcxx_oldglibc.sh "$HOME/zig"
+
       - uses: actions/cache@v4
         with:
           path: ~/.cache/sccache
           key: sccache-wasm-ld-${{ github.sha }}
           restore-keys: |
             sccache-wasm-ld-
-      - name: Bring up sccache-dist farm
+
+      - name: Bring up sccache-dist farm (optional)
         continue-on-error: true
         uses: xdqi/sccache-dist-action@v0.0.4
         with:
@@ -56,32 +94,45 @@ jobs:
           expected-workers: 3
           min-workers: 1
           oauth-secret: '${{ secrets.TS_OAUTH_SECRET }}'
+
       - name: Build wasm-ld
         run: |
-          CMAKE_LAUNCHER_ARGS=""
-          if command -v sccache >/dev/null 2>&1; then
-            CMAKE_LAUNCHER_ARGS="-DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache"
-          else
-            echo "sccache not available; building without a compiler launcher"
-          fi
+          # System libs are disabled (zstd/zlib/terminfo/libxml2) so nothing
+          # from the Ubuntu runner leaks into the gnu.2.11-portable binary.
           cmake -S llvm -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
-            $CMAKE_LAUNCHER_ARGS \
+            -DCMAKE_C_COMPILER="$PWD/ci/zig-cc" \
+            -DCMAKE_CXX_COMPILER="$PWD/ci/zig-cxx" \
             -DLLVM_ENABLE_PROJECTS=lld \
             -DLLVM_TARGETS_TO_BUILD=WebAssembly \
-            -DLLVM_INCLUDE_TESTS=OFF -DLLVM_INCLUDE_BENCHMARKS=OFF
+            -DLLVM_INCLUDE_TESTS=OFF \
+            -DLLVM_INCLUDE_BENCHMARKS=OFF \
+            -DLLVM_PARALLEL_LINK_JOBS=2 \
+            -DLLVM_ENABLE_ZSTD=OFF \
+            -DLLVM_ENABLE_ZLIB=OFF \
+            -DLLVM_ENABLE_TERMINFO=OFF \
+            -DLLVM_ENABLE_LIBXML2=OFF
           ninja -C build -j"${SCCACHE_J:-$(nproc)}" lld
           if command -v sccache >/dev/null 2>&1; then
             sccache --show-stats
           fi
-      - name: Package
+
+      - name: Package + portability check
         run: |
           mkdir -p out
-          cp build/bin/wasm-ld out/wasm-ld   # lld symlink target; cp dereferences it
+          cp build/bin/wasm-ld out/wasm-ld   # bin/wasm-ld is a symlink to lld; cp dereferences
           strip out/wasm-ld
+          file out/wasm-ld
+          # Portability gate: no glibc symbol newer than 2.11.
+          maxv="$(objdump -T out/wasm-ld | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)"
+          echo "max glibc symbol version: ${maxv:-none}"
+          if [ -n "$maxv" ]; then
+            printf '%s\nGLIBC_2.11\n' "$maxv" | sort -V | tail -1 | grep -qx 'GLIBC_2.11'
+          fi
+          out/wasm-ld --version
           out/wasm-ld --version | grep -q 'LLD 18'
           tar -C out -cJf wasm-ld-linux-amd64.tar.xz wasm-ld
+
       - name: Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -89,4 +140,4 @@ jobs:
           gh release create "${{ inputs.tag }}" wasm-ld-linux-amd64.tar.xz \
             --target "$GITHUB_SHA" \
             --title "${{ inputs.tag }}" \
-            --notes "Patched wasm-ld (GNU-ld SECTIONS{} support) for anyfs-reader's LKL wasm link."
+            --notes "Patched wasm-ld (GNU-ld SECTIONS{} support) for anyfs-reader's LKL wasm link. Built with zig cc targeting x86_64-linux-gnu.2.11 for old-glibc portability."
